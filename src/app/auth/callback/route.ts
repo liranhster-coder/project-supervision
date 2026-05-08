@@ -34,23 +34,31 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(`${origin}/login?error=exchange_failed`)
   }
 
-  // Check allowlist using service role to bypass RLS
-  const adminSupabase = createServerClient(
+  // Use service role for admin operations (bypass RLS)
+  const admin = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { cookies: { getAll: () => [], setAll: () => {} } }
   )
 
-  const { data: allowed, error: allowlistError } = await adminSupabase
+  // Check allowlist
+  const { data: allowed } = await admin
     .from('allowlist')
     .select('email')
     .eq('email', user.email!)
     .single()
 
-  if (allowlistError || !allowed) {
+  if (!allowed) {
     await supabase.auth.signOut()
     return NextResponse.redirect(`${origin}/access-denied`)
   }
+
+  // Upsert profile (trigger was removed — we do it here instead)
+  await admin.from('profiles').upsert({
+    id: user.id,
+    email: user.email!,
+    display_name: user.user_metadata?.full_name ?? user.user_metadata?.name ?? null,
+  }, { onConflict: 'id' })
 
   return NextResponse.redirect(`${origin}/`)
 }
