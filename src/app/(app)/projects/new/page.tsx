@@ -14,19 +14,35 @@ export default function NewProjectPage() {
   const [name, setName] = useState('')
   const [address, setAddress] = useState('')
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) return
     setLoading(true)
+    setError(null)
+
     const supabase = createClient()
-    const { data } = await supabase
+    const { data: { user } } = await supabase.auth.getUser()
+
+    if (!user) {
+      router.push('/login')
+      return
+    }
+
+    const { data, error: insertError } = await supabase
       .from('projects')
-      .insert({ name: name.trim(), address: address.trim() || null })
+      .insert({ name: name.trim(), address: address.trim() || null, created_by: user.id })
       .select('id')
       .single()
-    if (data) router.push(`/projects/${data.id}`)
-    else setLoading(false)
+
+    if (insertError || !data) {
+      setError('יצירת הפרויקט נכשלה. נסה שוב.')
+      setLoading(false)
+      return
+    }
+
+    router.push(`/projects/${data.id}`)
   }
 
   return (
@@ -59,6 +75,7 @@ export default function NewProjectPage() {
             placeholder="רחוב ומספר, עיר"
           />
         </div>
+        {error && <p className="text-sm text-red-500">{error}</p>}
         <Button type="submit" className="w-full" disabled={loading || !name.trim()}>
           {loading ? 'יוצר...' : 'צור פרויקט'}
         </Button>

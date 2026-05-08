@@ -34,7 +34,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(`${origin}/login?error=exchange_failed`)
   }
 
-  // Use service role for admin operations (bypass RLS)
   const admin = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
@@ -53,12 +52,20 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(`${origin}/access-denied`)
   }
 
-  // Upsert profile (trigger was removed — we do it here instead)
+  // Determine role: first user ever = owner, otherwise inspector
+  const { count } = await admin
+    .from('profiles')
+    .select('id', { count: 'exact', head: true })
+
+  const role = (count === 0 || count === null) ? 'owner' : 'inspector'
+
+  // Upsert profile
   await admin.from('profiles').upsert({
     id: user.id,
     email: user.email!,
     display_name: user.user_metadata?.full_name ?? user.user_metadata?.name ?? null,
-  }, { onConflict: 'id' })
+    role,
+  }, { onConflict: 'id', ignoreDuplicates: false })
 
   return NextResponse.redirect(`${origin}/`)
 }

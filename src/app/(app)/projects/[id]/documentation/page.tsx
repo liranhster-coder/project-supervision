@@ -17,12 +17,13 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
   const router = useRouter()
   const [mode, setMode] = useState<Mode>('choose')
   const [docType, setDocType] = useState<DocType>('progress')
-  const [photos, setPhotos] = useState<File[]>()
+  const [photos, setPhotos] = useState<File[]>([])
   const [photoPreviews, setPhotoPreviews] = useState<string[]>([])
   const [note, setNote] = useState('')
   const [recording, setRecording] = useState(false)
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null)
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const mediaRecorder = useRef<MediaRecorder | null>(null)
   const audioChunks = useRef<Blob[]>([])
   const fileInput = useRef<HTMLInputElement>(null)
@@ -30,7 +31,7 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
   function handlePhotoSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? [])
     if (!files.length) return
-    setPhotos((prev) => [...(prev ?? []), ...files])
+    setPhotos((prev) => [...prev, ...files])
     files.forEach((f) => {
       const reader = new FileReader()
       reader.onload = (ev) => setPhotoPreviews((p) => [...p, ev.target!.result as string])
@@ -40,17 +41,21 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
   }
 
   async function startRecording() {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    const mr = new MediaRecorder(stream)
-    audioChunks.current = []
-    mr.ondataavailable = (e) => audioChunks.current.push(e.data)
-    mr.onstop = () => {
-      setAudioBlob(new Blob(audioChunks.current, { type: 'audio/webm' }))
-      stream.getTracks().forEach((t) => t.stop())
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mr = new MediaRecorder(stream)
+      audioChunks.current = []
+      mr.ondataavailable = (e) => audioChunks.current.push(e.data)
+      mr.onstop = () => {
+        setAudioBlob(new Blob(audioChunks.current, { type: 'audio/webm' }))
+        stream.getTracks().forEach((t) => t.stop())
+      }
+      mr.start()
+      mediaRecorder.current = mr
+      setRecording(true)
+    } catch {
+      setSaveError('לא ניתן לגשת למיקרופון')
     }
-    mr.start()
-    mediaRecorder.current = mr
-    setRecording(true)
   }
 
   function stopRecording() {
@@ -58,61 +63,90 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
     setRecording(false)
   }
 
+  function reset() {
+    setMode('choose')
+    setPhotos([])
+    setPhotoPreviews([])
+    setNote('')
+    setAudioBlob(null)
+    setSaveError(null)
+  }
+
   async function save(addIssue = false) {
     setSaving(true)
-    const supabase = createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return
+    setSaveError(null)
 
-    // Get or create today's visit
-    const today = new Date().toISOString().split('T')[0]
-    let visitId: string
-    const { data: existing } = await supabase
-      .from('visits')
-      .select('id')
-      .eq('project_id', id)
-      .eq('date', today)
-      .single()
+    try {
+      const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) { router.push('/login'); return }
 
-    if (existing) {
-      visitId = existing.id
-    } else {
-      const { data: newVisit } = await supabase
+      // Get or create today's visit
+      const today = new Date().toISOString().split('T')[0]
+      let visitId: string
+
+      const { data: existing } = await supabase
         .from('visits')
-        .insert({ project_id: id, date: today, created_by: user.id })
+        .select('id')
+        .eq('project_id', id)
+        .eq('date', today)
+        .single()
+
+      if (existing) {
+        visitId = existing.id
+      } else {
+        const { data: newVisit, error: visitError } = await supabase
+          .from('visits')
+          .insert({ project_id: id, date: today, created_by: user.id })
+          .select('id')
+          .single()
+        if (visitError || !newVisit) throw new Error('יצירת הביקור נכשלה')
+        visitId = newVisit.id
+      }
+
+      // Create observation
+      const { data: obs, error: obsError } = await supabase
+        .from('observations')
+        .insert({ visit_id: visitId, project_id: id, type: docType, text: note || null, created_by: user.id })
         .select('id')
         .single()
-      visitId = newVisit!.id
-    }
 
-    // Create observation
-    const { data: obs } = await supabase
-      .from('observations')
-      .insert({ visit_id: visitId, project_id: id, type: docType, text: note || null, created_by: user.id })
-      .select('id')
-      .single()
+      if (obsError || !obs) throw new Error('שמירת התיעוד נכשלה')
 
-    if (obs) {
       // Upload photos
-      for (const photo of (photos ?? [])) {
-        const path = `${id}/${visitId}/${obs.id}/${photo.name}`
-        await supabase.storage.from('photos').upload(path, photo)
-        await supabase.from('observation_files').insert({ observation_id: obs.id, file_type: 'photo', storage_path: path })
+      for (const photo of photos) {
+        const ext = photo.name.split('.').pop() ?? 'jpg'
+        const path = `${id}/${visitId}/${obs.id}/${Date.now()}.${ext}`
+        const { error: uploadError } = await supabase.storage.from('photos').upload(path, photo)
+        if (!uploadError) {
+          await supabase.from('observation_files').insert({ observation_id: obs.id, file_type: 'photo', storage_path: path })
+        }
       }
+
       // Upload audio
       if (audioBlob) {
-        const path = `${id}/${visitId}/${obs.id}/recording.webm`
-        await supabase.storage.from('audio').upload(path, audioBlob)
-        await supabase.from('observation_files').insert({ observation_id: obs.id, file_type: 'audio', storage_path: path })
+        const path = `${id}/${visitId}/${obs.id}/recording-${Date.now()}.webm`
+        const { error: audioError } = await supabase.storage.from('audio').upload(path, audioBlob)
+        if (!audioError) {
+          await supabase.from('observation_files').insert({ observation_id: obs.id, file_type: 'audio', storage_path: path })
+        }
       }
+
       // Create issue if requested
       if (addIssue) {
-        await supabase.from('issues').insert({ observation_id: obs.id, project_id: id, description: note || 'ממצא מהשטח' })
+        await supabase.from('issues').insert({
+          observation_id: obs.id,
+          project_id: id,
+          description: note || 'ממצא מהשטח',
+        })
       }
-    }
 
-    setMode('done')
-    setSaving(false)
+      setMode('done')
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'שגיאה בשמירת התיעוד')
+    } finally {
+      setSaving(false)
+    }
   }
 
   if (mode === 'done') {
@@ -124,7 +158,7 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
         <h2 className="text-xl font-bold">התיעוד נשמר</h2>
         <p className="text-gray-500 text-sm">הממצא נוסף לביקור היום</p>
         <div className="flex flex-col gap-2 w-full max-w-xs mt-2">
-          <Button onClick={() => { setMode('choose'); setPhotos([]); setPhotoPreviews([]); setNote(''); setAudioBlob(null) }}>
+          <Button onClick={reset}>
             <Plus size={16} className="me-1" />
             תעד עוד
           </Button>
@@ -152,7 +186,7 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
             onClick={() => { setDocType('progress'); fileInput.current?.click() }}
             className="w-full bg-white border-2 border-gray-200 rounded-xl p-5 text-right hover:border-blue-300 transition-colors flex items-center gap-4"
           >
-            <div className="bg-blue-100 text-blue-600 rounded-lg p-2.5">
+            <div className="bg-blue-100 text-blue-600 rounded-lg p-2.5 flex-shrink-0">
               <TrendingUp size={24} />
             </div>
             <div>
@@ -164,7 +198,7 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
             onClick={() => { setDocType('issue'); fileInput.current?.click() }}
             className="w-full bg-white border-2 border-gray-200 rounded-xl p-5 text-right hover:border-orange-300 transition-colors flex items-center gap-4"
           >
-            <div className="bg-orange-100 text-orange-600 rounded-lg p-2.5">
+            <div className="bg-orange-100 text-orange-600 rounded-lg p-2.5 flex-shrink-0">
               <AlertTriangle size={24} />
             </div>
             <div>
@@ -203,6 +237,9 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
           <Button className="w-full" onClick={() => setMode('note')}>
             המשך להוספת הערה
           </Button>
+          <button onClick={reset} className="w-full text-sm text-gray-400 hover:text-gray-600 py-1">
+            ביטול
+          </button>
         </div>
       )}
 
@@ -223,16 +260,15 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
             placeholder={docType === 'progress' ? 'תאר את מצב ההתקדמות...' : 'תאר את הממצא...'}
             rows={4}
           />
-          <div className="flex gap-2">
-            <Button
-              variant={recording ? 'destructive' : 'outline'}
-              onClick={recording ? stopRecording : startRecording}
-              className="flex-1 gap-2"
-            >
-              {recording ? <><MicOff size={16} /> עצור הקלטה</> : <><Mic size={16} /> הקלט הערה קולית</>}
-            </Button>
-          </div>
+          <Button
+            variant={recording ? 'destructive' : 'outline'}
+            onClick={recording ? stopRecording : startRecording}
+            className="w-full gap-2"
+          >
+            {recording ? <><MicOff size={16} /> עצור הקלטה</> : <><Mic size={16} /> הקלט הערה קולית</>}
+          </Button>
           {audioBlob && <p className="text-xs text-green-600">✓ הקלטה נשמרה</p>}
+          {saveError && <p className="text-sm text-red-500">{saveError}</p>}
           <div className="space-y-2 pt-2">
             {docType === 'issue' ? (
               <>
