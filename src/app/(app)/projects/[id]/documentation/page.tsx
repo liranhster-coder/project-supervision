@@ -41,20 +41,38 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
   }
 
   async function startRecording() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setSaveError('הקלטה אינה נתמכת בדפדפן זה. נסה ב-Chrome או Safari עדכני.')
+      return
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mr = new MediaRecorder(stream)
+      // Pick best supported format: mp4 for Safari/iOS, webm for Chrome/Android
+      const mimeType = MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : ''
+      const mr = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
       audioChunks.current = []
-      mr.ondataavailable = (e) => audioChunks.current.push(e.data)
+      mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.current.push(e.data) }
       mr.onstop = () => {
-        setAudioBlob(new Blob(audioChunks.current, { type: 'audio/webm' }))
+        const type = mr.mimeType || 'audio/webm'
+        setAudioBlob(new Blob(audioChunks.current, { type }))
         stream.getTracks().forEach((t) => t.stop())
       }
-      mr.start()
+      mr.start(500) // collect in 500ms chunks for reliability
       mediaRecorder.current = mr
       setRecording(true)
-    } catch {
-      setSaveError('לא ניתן לגשת למיקרופון')
+      setSaveError(null)
+    } catch (err: any) {
+      if (err?.name === 'NotAllowedError') {
+        setSaveError('גישה למיקרופון נדחתה. אנא אפשר גישה בהגדרות הדפדפן ונסה שוב.')
+      } else if (err?.name === 'NotFoundError') {
+        setSaveError('לא נמצא מיקרופון במכשיר זה.')
+      } else {
+        setSaveError('לא ניתן להתחיל הקלטה. בדוק הרשאות מיקרופון ונסה שוב.')
+      }
     }
   }
 

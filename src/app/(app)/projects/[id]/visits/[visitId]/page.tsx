@@ -1,14 +1,15 @@
 import { createClient } from '@/lib/supabase/server'
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
-import { ArrowRight, FileText, Camera, Mic, AlertTriangle, TrendingUp } from 'lucide-react'
+import { ArrowRight, FileText } from 'lucide-react'
 import GenerateReportButton from './generate-report-button'
+import ObservationCard from './observation-card'
 
 export default async function VisitPage({ params }: { params: Promise<{ id: string; visitId: string }> }) {
   const { id, visitId } = await params
   const supabase = await createClient()
 
-  const { data: visit } = await supabase
+  const { data: visit, error: visitError } = await supabase
     .from('visits')
     .select(`
       *,
@@ -21,12 +22,43 @@ export default async function VisitPage({ params }: { params: Promise<{ id: stri
     .eq('id', visitId)
     .single()
 
-  if (!visit) notFound()
+  if (visitError || !visit) notFound()
 
-  const { data: project } = await supabase.from('projects').select('name').eq('id', id).single()
+  const { data: project } = await supabase
+    .from('projects')
+    .select('name')
+    .eq('id', id)
+    .single()
 
-  const observations = (visit.observations as any[]) ?? []
+  const rawObservations = (visit.observations as any[]) ?? []
   const reports = (visit.reports as any[]) ?? []
+
+  // Generate signed URLs for all files
+  const observations = await Promise.all(
+    rawObservations.map(async (obs: any) => {
+      const rawFiles = (obs.observation_files ?? []) as any[]
+      const files = await Promise.all(
+        rawFiles.map(async (file: any) => {
+          const bucket = file.file_type === 'photo' ? 'photos' : 'audio'
+          const { data } = await supabase.storage
+            .from(bucket)
+            .createSignedUrl(file.storage_path, 3600)
+          return {
+            id: file.id,
+            file_type: file.file_type as 'photo' | 'audio',
+            signedUrl: data?.signedUrl ?? null,
+          }
+        })
+      )
+      return {
+        id: obs.id,
+        type: obs.type as 'progress' | 'issue',
+        text: obs.text as string | null,
+        created_at: obs.created_at as string,
+        files,
+      }
+    })
+  )
 
   return (
     <div>
@@ -35,7 +67,9 @@ export default async function VisitPage({ params }: { params: Promise<{ id: stri
           <ArrowRight size={20} />
         </Link>
         <h1 className="text-xl font-bold">
-          {new Date(visit.date).toLocaleDateString('he-IL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+          {new Date(visit.date).toLocaleDateString('he-IL', {
+            weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+          })}
         </h1>
       </div>
       <p className="text-sm text-gray-400 mb-5 pe-7">{project?.name}</p>
@@ -46,7 +80,7 @@ export default async function VisitPage({ params }: { params: Promise<{ id: stri
         </div>
       )}
 
-      {/* Report section */}
+      {/* Report */}
       <div className="bg-white border border-gray-200 rounded-xl p-4 mb-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -58,38 +92,16 @@ export default async function VisitPage({ params }: { params: Promise<{ id: stri
       </div>
 
       {/* Observations */}
-      <h2 className="font-semibold text-sm text-gray-500 mb-3">ממצאים ותיעוד ({observations.length})</h2>
+      <h2 className="font-semibold text-sm text-gray-500 mb-3">
+        ממצאים ותיעוד ({observations.length})
+      </h2>
       {observations.length === 0 ? (
         <p className="text-gray-400 text-sm">אין תיעוד לביקור זה</p>
       ) : (
         <div className="space-y-3">
-          {observations.map((obs: any) => {
-            const photos = obs.observation_files?.filter((f: any) => f.file_type === 'photo') ?? []
-            const audios = obs.observation_files?.filter((f: any) => f.file_type === 'audio') ?? []
-            return (
-              <div key={obs.id} className="bg-white border border-gray-200 rounded-xl p-4">
-                <div className="flex items-center gap-2 mb-2">
-                  {obs.type === 'issue' ? (
-                    <span className="flex items-center gap-1 text-xs font-medium text-orange-600 bg-orange-50 px-2 py-0.5 rounded-full">
-                      <AlertTriangle size={11} /> ממצא
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1 text-xs font-medium text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
-                      <TrendingUp size={11} /> התקדמות
-                    </span>
-                  )}
-                  <span className="text-xs text-gray-400">
-                    {new Date(obs.created_at).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                </div>
-                {obs.text && <p className="text-sm text-gray-700 mb-2">{obs.text}</p>}
-                <div className="flex items-center gap-3 text-xs text-gray-400">
-                  {photos.length > 0 && <span className="flex items-center gap-1"><Camera size={12} /> {photos.length} תמונות</span>}
-                  {audios.length > 0 && <span className="flex items-center gap-1"><Mic size={12} /> הקלטה</span>}
-                </div>
-              </div>
-            )
-          })}
+          {observations.map((obs) => (
+            <ObservationCard key={obs.id} obs={obs} />
+          ))}
         </div>
       )}
     </div>
