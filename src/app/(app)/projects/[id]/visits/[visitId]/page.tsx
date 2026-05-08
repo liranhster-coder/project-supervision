@@ -43,10 +43,15 @@ export default async function VisitPage({ params }: { params: Promise<{ id: stri
           const { data } = await supabase.storage
             .from(bucket)
             .createSignedUrl(file.storage_path, 3600)
+          const ext = file.storage_path.split('.').pop()?.toLowerCase()
+          const mimeType = file.file_type === 'audio'
+            ? (ext === 'm4a' || ext === 'mp4' ? 'audio/mp4' : 'audio/webm')
+            : null
           return {
             id: file.id,
             file_type: file.file_type as 'photo' | 'audio',
             signedUrl: data?.signedUrl ?? null,
+            mimeType,
           }
         })
       )

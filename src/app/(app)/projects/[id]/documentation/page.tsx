@@ -143,8 +143,10 @@ export default function DocumentationPage({ params }: { params: Promise<{ id: st
 
       // Upload audio
       if (audioBlob) {
-        const path = `${id}/${visitId}/${obs.id}/recording-${Date.now()}.webm`
-        const { error: audioError } = await supabase.storage.from('audio').upload(path, audioBlob)
+        const mimeType = audioBlob.type || 'audio/webm'
+        const ext = mimeType.includes('mp4') ? 'm4a' : 'webm'
+        const path = `${id}/${visitId}/${obs.id}/recording-${Date.now()}.${ext}`
+        const { error: audioError } = await supabase.storage.from('audio').upload(path, audioBlob, { contentType: mimeType })
         if (!audioError) {
           await supabase.from('observation_files').insert({ observation_id: obs.id, file_type: 'audio', storage_path: path })
         }
